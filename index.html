@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0e14">
+<title>Voice</title>
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" href="./icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="./icon.svg">
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #131826; --line: #232b3d;
+    --text: #e8ecf4; --dim: #8b94a8; --accent: #e14b5a; --ok: #3ecf8e; --warn: #f5a623;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column;
+    padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 18px; border-bottom: 1px solid var(--line);
+  }
+  header h1 { font-size: 15px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--dim); }
+  #bell {
+    background: none; border: 1px solid var(--line); color: var(--dim);
+    border-radius: 8px; padding: 6px 10px; font-size: 12px;
+  }
+  #bell.on { color: var(--ok); border-color: var(--ok); }
+  #turns { flex: 1; overflow-y: auto; padding: 16px 14px 140px; display: flex; flex-direction: column; gap: 12px; }
+  .turn { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; }
+  .turn .meta { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--dim); margin-bottom: 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); flex: none; }
+  .dot.done { background: var(--ok); } .dot.error { background: var(--accent); }
+  .dot.working { animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .3; } }
+  .you { color: var(--dim); font-size: 13px; margin-bottom: 8px; white-space: pre-wrap; }
+  .you b { color: var(--text); font-weight: 600; }
+  .reply { white-space: pre-wrap; }
+  .err { color: var(--accent); font-size: 14px; }
+  .row { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+  .row button, .row a {
+    font-size: 13px; text-decoration: none; color: var(--text);
+    background: #1b2234; border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px;
+  }
+  .empty { color: var(--dim); text-align: center; margin-top: 40px; font-size: 14px; }
+  footer {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    padding: 14px 0 calc(18px + env(safe-area-inset-bottom));
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    background: linear-gradient(transparent, var(--bg) 30%);
+  }
+  #status { font-size: 13px; color: var(--dim); min-height: 20px; }
+  #mic {
+    width: 84px; height: 84px; border-radius: 50%; border: none; cursor: pointer;
+    background: radial-gradient(circle at 35% 30%, #ff6b7a, var(--accent));
+    box-shadow: 0 6px 30px rgba(225, 75, 90, .45);
+    display: grid; place-items: center; transition: transform .12s;
+  }
+  #mic:active { transform: scale(.94); }
+  #mic svg { width: 34px; height: 34px; fill: #fff; }
+  #mic.rec { animation: ring 1.6s ease-out infinite; }
+  @keyframes ring { 0% { box-shadow: 0 0 0 0 rgba(225,75,90,.5); } 100% { box-shadow: 0 0 0 26px rgba(225,75,90,0); } }
+  #mic:disabled { filter: grayscale(.7); opacity: .6; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Voice</h1>
+  <button id="bell">🔔 alerts off</button>
+</header>
+
+<div id="turns"><div class="empty">Tap the mic, talk (up to ~10 min), tap again to send.</div></div>
+
+<footer>
+  <div id="status">Ready</div>
+  <button id="mic" aria-label="record">
+    <svg viewBox="0 0 24 24"><path d="M12 15a4 4 0 0 0 4-4V6a4 4 0 1 0-8 0v5a4 4 0 0 0 4 4zm6-4a6 6 0 0 1-12 0H4a8 8 0 0 0 7 7.94V22h2v-3.06A8 8 0 0 0 20 11h-2z"/></svg>
+  </button>
+</footer>
+
+<script type="module">
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+const SUPABASE_URL = "https://nrnthnevopltloyvzreh.supabase.co";
+const ANON_KEY = "sb_publishable_C0p5XqtsbBp9O8aIhNk1_w_mwl4KfEW";
+const VAPID_PUBLIC_KEY = "BHBPF_ebasSY6-3l4jsgoVDjtwvxhHum2mBheGApShnGGOEOTvlijBpJPWfMMXqHDMeBSbd9d9yAxHnXzMtgzzA";
+const BASE = `${SUPABASE_URL}/functions/v1`;
+
+// ---- session identity (unguessable, sticky) ----
+const SID = localStorage.sid ?? (localStorage.sid = crypto.randomUUID());
+
+const $ = (id) => document.getElementById(id);
+const statusEl = $("status"), micEl = $("mic"), turnsEl = $("turns"), bellEl = $("bell");
+let lastPlayed = localStorage.lastPlayed ?? "";
+let currentAudio = null;
+
+// ---- mailbox: realtime channel (instant) + history fetch (catch-up) ----
+const sb = createClient(SUPABASE_URL, ANON_KEY);
+sb.channel(`session:${SID}`)
+  .on("broadcast", { event: "turn" }, () => refresh(true))
+  .subscribe();
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(true); });
+
+async function refresh(autoplay = false) {
+  try {
+    const res = await fetch(`${BASE}/turn?session_id=${SID}`);
+    const { turns = [] } = await res.json();
+    render(turns);
+    if (autoplay) {
+      const fresh = turns.find((t) => t.status === "done" && t.reply_audio_url);
+      if (fresh && fresh.id !== lastPlayed) {
+        lastPlayed = localStorage.lastPlayed = fresh.id;
+        play(fresh.reply_audio_url);
+      }
+    }
+  } catch { /* offline is fine; next refresh catches up */ }
+}
+
+function esc(s) { return (s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+function render(turns) {
+  if (!turns.length) return;
+  turnsEl.innerHTML = turns.map((t) => {
+    const when = new Date(t.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const mins = t.duration_secs ? ` · ${Math.round(t.duration_secs / 60)}m spoken` : "";
+    const body =
+      t.status === "working" ? `<div class="you">Thinking & running tools… (started ${when})</div>` :
+      t.status === "error"   ? `<div class="err">⚠ ${esc(t.error ?? "failed")}</div>` :
+      `<div class="you"><b>You:</b> ${esc(short(t.transcript))}</div><div class="reply">${esc(t.reply_text ?? "")}</div>`;
+    const actions = [
+      t.reply_audio_url ? `<button data-play="${esc(t.reply_audio_url)}">▶ Play</button>` : "",
+      t.thread_url ? `<a href="${esc(t.thread_url)}" target="_blank" rel="noopener">Open thread ↗</a>` : "",
+    ].filter(Boolean).join("");
+    return `<div class="turn">
+      <div class="meta"><span class="dot ${t.status}"></span>${when}${mins}</div>
+      ${body}${actions ? `<div class="row">${actions}</div>` : ""}
+    </div>`;
+  }).join("");
+  turnsEl.querySelectorAll("[data-play]").forEach((b) => b.onclick = () => play(b.dataset.play));
+}
+const short = (s) => !s ? "" : s.length > 280 ? s.slice(0, 280) + "…" : s;
+
+function play(url) {
+  currentAudio?.pause();
+  currentAudio = new Audio(url);
+  currentAudio.play().catch(() => setStatus("Tap ▶ Play to hear the reply"));
+}
+function setStatus(t) { statusEl.textContent = t; }
+
+// ---- recorder: tap to start, tap to send (one multipart upload) ----
+let rec = null, chunks = [], t0 = 0, timer = null;
+
+micEl.onclick = async () => {
+  if (rec?.state === "recording") return stopAndSend();
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+    });
+    const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"].find((m) => MediaRecorder.isTypeSupported(m)) || "";
+    rec = new MediaRecorder(stream, { mimeType: mime, audioBitsPerSecond: 32000 });
+    chunks = [];
+    rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+    rec.onstop = () => stream.getTracks().forEach((t) => t.stop());
+    rec.start(10000); // gather data every 10s; still ONE upload at the end
+    t0 = Date.now();
+    micEl.classList.add("rec");
+    timer = setInterval(() => {
+      const s = Math.floor((Date.now() - t0) / 1000);
+      setStatus(`● Recording ${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")} — tap to send`);
+      if (s >= 3600) stopAndSend(); // hard ceiling
+    }, 500);
+  } catch {
+    setStatus("Microphone permission needed");
+  }
+};
+
+async function stopAndSend() {
+  clearInterval(timer);
+  micEl.classList.remove("rec");
+  const durationSecs = Math.round((Date.now() - t0) / 1000);
+  const mime = rec.mimeType || "audio/webm";
+  const done = new Promise((r) => rec.addEventListener("stop", r, { once: true }));
+  rec.requestData?.(); rec.stop();
+  await done;
+
+  const blob = new Blob(chunks, { type: mime });
+  if (blob.size < 1000) { setStatus("Too short — try again"); return; }
+
+  micEl.disabled = true;
+  setStatus(`Uploading ${(blob.size / 1048576).toFixed(1)} MB…`);
+  const fd = new FormData();
+  fd.append("audio", blob, "clip." + (mime.includes("mp4") ? "m4a" : "webm"));
+  fd.append("session_id", SID);
+  fd.append("duration_secs", String(durationSecs));
+
+  try {
+    const res = await fetch(`${BASE}/turn`, { method: "POST", body: fd });
+    const out = await res.json();
+    if (!res.ok) throw new Error(out.error ?? res.status);
+    setStatus("Sent — I'll ping you when it's ready");
+  } catch (e) {
+    setStatus(`Upload failed: ${e.message}`);
+  } finally {
+    micEl.disabled = false;
+    refresh();
+  }
+}
+
+// ---- doorbell: web push ----
+const b64ToBytes = (s) => {
+  const raw = atob(s.replace(/-/g, "+").replace(/_/g, "/"));
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+};
+
+async function enablePush(silent = false) {
+  try {
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
+    const reg = await navigator.serviceWorker.register("./sw.js");
+    if (Notification.permission !== "granted") {
+      if (silent) return;
+      if ((await Notification.requestPermission()) !== "granted") return;
+    }
+    const sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: b64ToBytes(VAPID_PUBLIC_KEY),
+    });
+    await fetch(`${BASE}/subscribe`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ session_id: SID, subscription: sub.toJSON() }),
+    });
+    bellEl.textContent = "🔔 alerts on";
+    bellEl.classList.add("on");
+  } catch { if (!silent) setStatus("Notifications unavailable"); }
+}
+bellEl.onclick = () => enablePush(false);
+
+refresh();
+enablePush(true); // re-sync silently if already granted
+</script>
+</body>
+</html>
